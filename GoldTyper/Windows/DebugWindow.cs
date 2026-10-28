@@ -3,6 +3,7 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
 using ECommons.DalamudServices;
 using GoldTyper.Game;
+using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -101,16 +102,24 @@ public class DebugWindow : Window, IDisposable
         ImGui.PopStyleColor(21);
     }
 
+    private bool firstDraw = true;
+
     public override void Draw()
     {
+        if (firstDraw)
+            Svc.Log.Information("首次窗口绘制：开始");
         TrackRunHistory();
 
         var automation = GameAutomation.Instance;
         DrawHeader();
+        if (firstDraw)
+            Svc.Log.Information("首次窗口绘制：标题完成，开始操作区");
         DrawControls(automation);
         if (minimized)
             return;
         DrawTabs();
+        if (firstDraw)
+            Svc.Log.Information("首次窗口绘制：操作区和标签完成，开始页面");
 
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4, 8) * ImGuiHelpers.GlobalScale);
         var visible = ImGui.BeginChild($"##page{selectedTab}", Vector2.Zero, false,
@@ -137,6 +146,9 @@ public class DebugWindow : Window, IDisposable
         }
 
         ImGui.EndChild();
+        if (firstDraw)
+            Svc.Log.Information("首次窗口绘制：页面完成");
+        firstDraw = false;
     }
 
     private void DrawHeader()
@@ -156,9 +168,9 @@ public class DebugWindow : Window, IDisposable
         drawList.AddText(textPosition, ImGui.GetColorU32(TextColor), "金蝶打字通");
 
         var titleWidth = ImGui.CalcTextSize("金蝶打字通").X;
-        if (width >= titleWidth + ImGui.CalcTextSize("v0.1.0").X + 12f * scale)
+        if (width >= titleWidth + ImGui.CalcTextSize("v0.1.1").X + 12f * scale)
             drawList.AddText(textPosition + new Vector2(titleWidth + 12f * scale, 0),
-                ImGui.GetColorU32(MutedColor), "v0.1.0");
+                ImGui.GetColorU32(MutedColor), "v0.1.1");
 
         ImGui.SameLine(0, gap);
         if (ImGui.Button(minimized ? "□##minimize" : "−##minimize", new Vector2(height)))
@@ -186,7 +198,8 @@ public class DebugWindow : Window, IDisposable
 
     private void DrawControls(GameAutomation automation)
     {
-        BeginCard("##controls");
+        if (!BeginCard("##controls"))
+            return;
         DrawWrapped(CurrentStateColor(automation), $"● {StateText(automation)}");
         DrawControlMessage(automation.LastMessage);
 
@@ -269,39 +282,55 @@ public class DebugWindow : Window, IDisposable
 
     private void DrawTabs()
     {
-        if (!ImGui.BeginTabBar("##GoldTyperTabs", ImGuiTabBarFlags.FittingPolicyResizeDown))
-            return;
-
         DrawTab("自动", 0);
+        ImGui.SameLine();
         DrawTab("选项", 1);
+        ImGui.SameLine();
         DrawTab("测试工具", 2);
+        ImGui.SameLine();
         DrawTab("状态", 3);
-        ImGui.EndTabBar();
+        ImGui.Separator();
     }
 
     private void DrawTab(string label, int index)
     {
-        if (!ImGui.BeginTabItem(label))
-            return;
-
-        selectedTab = index;
-        ImGui.EndTabItem();
+        var selected = selectedTab == index;
+        if (selected)
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.54f, 0.71f, 0.97f, 0.22f));
+        if (ImGui.Button(label))
+            selectedTab = index;
+        if (selected)
+            ImGui.PopStyleColor();
     }
 
     private void DrawAutoTab(GameAutomation automation)
     {
         DrawPageHeading("自动完成", "点击开始，等待金蝶小游戏出现。仅在目标窗口激活时运行。\n自动输入属于自动化操作，存在违规风险，请自行评估。");
 
-        BeginCard("##prompt");
+        if (!BeginCard("##prompt"))
+            return;
         DrawWrapped(MutedColor, "当前题目");
         DrawWrapped(string.IsNullOrEmpty(automation.CurrentPrompt) ? MutedColor : AccentColor,
-            string.IsNullOrEmpty(automation.CurrentPrompt) ? "暂无题目" : automation.CurrentPrompt);
+            automation.WaitingPrompt.Length > 0 ? automation.WaitingPrompt :
+                string.IsNullOrEmpty(automation.CurrentPrompt) ? "暂无题目" : automation.CurrentPrompt);
+        ImGui.Separator();
+        DrawWrapped(MutedColor, "选定目标 → 间隔与字数等待 → 填入并提交 → 确认清空");
+        DrawWrapped(TextColor, $"当前步骤：{automation.LastMessage}");
+        if (automation.IsRunning && !automation.Paused && automation.WaitingPrompt.Length > 0)
+        {
+            DrawWrapped(MutedColor, automation.DelayBreakdown);
+            DrawWrapped(AccentColor, automation.RemainingDelay > 0
+                ? $"词条等待剩余 {automation.RemainingDelay / 1000f:F1} 秒"
+                : "词条等待已结束，正在准备输入");
+        }
+        if (automation.LastAnswerMilliseconds > 0)
+            DrawWrapped(MutedColor, $"上一题从选定到确认清空：{automation.LastAnswerMilliseconds / 1000f:F2} 秒，其中提交后确认 {automation.LastSubmitMilliseconds} ms");
         EndCard();
 
         DrawStats();
-        DrawWrapped(MutedColor, Plugin.Configuration.启用防Afk活动输入 ? $"活动输入：{ActivityInput.Status}" : "活动输入：已关闭");
 
-        BeginCard("##modules");
+        if (!BeginCard("##modules"))
+            return;
         ImGui.TextUnformatted("模块状态");
         ImGui.Separator();
         ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(0, 4) * ImGuiHelpers.GlobalScale);
@@ -342,13 +371,23 @@ public class DebugWindow : Window, IDisposable
         }
 
         ImGui.TableNextColumn();
-        BeginCard("##recentRuns");
+        if (!BeginCard("##recentRuns"))
+        {
+            ImGui.EndTable();
+            ImGui.PopStyleVar();
+            return;
+        }
         DrawWrapped(MutedColor, "最近运行");
         ImGui.TextUnformatted(runHistory.Count.ToString("00"));
         EndCard();
 
         ImGui.TableNextColumn();
-        BeginCard("##successRate");
+        if (!BeginCard("##successRate"))
+        {
+            ImGui.EndTable();
+            ImGui.PopStyleVar();
+            return;
+        }
         DrawWrapped(MutedColor, "成功率");
         ImGui.TextUnformatted(success);
         EndCard();
@@ -381,17 +420,10 @@ public class DebugWindow : Window, IDisposable
             ReentryDriver.RememberTarget();
         HoverTip($"入口 NPC：{(Plugin.Configuration.入口Npc名称.Length == 0 ? "未记录；在入口选中 NPC 后点击开始，或点击此按钮记录" : Plugin.Configuration.入口Npc名称)}");
 
-        BeginCard("##inputOptions");
+        if (!BeginCard("##inputOptions"))
+            return;
         ImGui.TextUnformatted("输入参数");
         ImGui.Separator();
-
-        var activityInput = Plugin.Configuration.启用防Afk活动输入;
-        if (ImGui.Checkbox("启用防 AFK 活动输入", ref activityInput))
-        {
-            Plugin.Configuration.启用防Afk活动输入 = activityInput;
-            Plugin.Configuration.Save();
-        }
-        HoverTip("每次自动答题前发送随机英文字母和实体回车，确认输入清空后再填写答案。关闭后跳过活动输入；正在执行的按键在下一次游戏线程更新中释放并清理已确认属于插件的字符。需要游戏在前台，实际防 AFK 效果仍待验证。");
 
         var prioritizeCasting = Plugin.Configuration.优先处理读条目标;
         if (ImGui.Checkbox("优先处理读条目标", ref prioritizeCasting))
@@ -421,10 +453,24 @@ public class DebugWindow : Window, IDisposable
 
         var max = Plugin.Configuration.输入间隔最大毫秒;
         if (DrawSliderField("##maxInterval", "输入间隔最大", ref max,
-            Plugin.Configuration.输入间隔最小毫秒, 30000, "ms"))
+                Plugin.Configuration.输入间隔最小毫秒, 30000, "ms"))
             Plugin.Configuration.输入间隔最大毫秒 = Math.Clamp(max, Plugin.Configuration.输入间隔最小毫秒, 30000);
         if (ImGui.IsItemDeactivatedAfterEdit())
             Plugin.Configuration.Save();
+
+        var dynamicDelay = Plugin.Configuration.按词条长度动态延迟;
+        if (ImGui.Checkbox("按词条长度动态延迟", ref dynamicDelay))
+        {
+            Plugin.Configuration.按词条长度动态延迟 = dynamicDelay;
+            Plugin.Configuration.Save();
+        }
+        var perCharacter = Plugin.Configuration.每个字符追加毫秒;
+        if (DrawSliderField("##characterDelay", "每个字符追加", ref perCharacter, 0, 30000, "ms"))
+            Plugin.Configuration.每个字符追加毫秒 = Math.Clamp(perCharacter, 0, 30000);
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            Plugin.Configuration.Save();
+
+        DrawWrapped(MutedColor, "选定词条后，从输入间隔范围内随机取值，再按字符数追加耗时，总计不超过 30000 ms。关闭动态延迟后仅使用原有随机间隔。等待结束后填入并立即提交。");
 
         var retry = Plugin.Configuration.失败重试次数;
         if (DrawSliderField("##retryCount", "失败重试次数", ref retry, 0, 10, "次"))
@@ -440,7 +486,8 @@ public class DebugWindow : Window, IDisposable
         }
         EndCard();
 
-        BeginCard("##debugOptions");
+        if (!BeginCard("##debugOptions"))
+            return;
         var debug = Plugin.Configuration.调试日志;
         if (ImGui.Checkbox("启用调试日志", ref debug))
         {
@@ -497,7 +544,8 @@ public class DebugWindow : Window, IDisposable
         if (!ImGui.CollapsingHeader("备用工具（聊天发送 / 节点点击）"))
             return;
 
-        BeginCard("##chatTool");
+        if (!BeginCard("##chatTool"))
+            return;
         ImGui.TextUnformatted("聊天发送");
         ImGui.Separator();
 
@@ -533,7 +581,8 @@ public class DebugWindow : Window, IDisposable
         DrawResult(chatResult, chatSuccess);
         EndCard();
 
-        BeginCard("##addonTool");
+        if (!BeginCard("##addonTool"))
+            return;
         ImGui.TextUnformatted("Addon 节点点击");
         ImGui.Separator();
 
@@ -577,7 +626,8 @@ public class DebugWindow : Window, IDisposable
     private void DrawDiagnostics()
     {
         var diagnostics = GameDiagnostics.Instance;
-        BeginCard("##gameDiagnostics");
+        if (!BeginCard("##gameDiagnostics"))
+            return;
         ImGui.TextUnformatted("小游戏实时诊断");
         if (diagnostics.InputMessage.Length > 0)
             DrawWrapped(WarningColor, diagnostics.InputMessage);
@@ -680,7 +730,12 @@ public class DebugWindow : Window, IDisposable
     {
         DrawPageHeading("运行状态", "查看当前题目、执行信息与最近记录。\n使用 /gt 或 /打字通 打开窗口；拖动顶部名称区域移动窗口。");
 
-        BeginCard("##currentData");
+        if (!BeginCard("##currentData"))
+            return;
+        var partyStatus = GetPartyStatus();
+        DrawWrapped(MutedColor, "队伍状态");
+        DrawWrapped(TextColor, partyStatus);
+        ImGui.Separator();
         DrawWrapped(MutedColor, "当前题目");
         DrawWrapped(AccentColor, string.IsNullOrEmpty(automation.CurrentPrompt) ? "暂无题目" : automation.CurrentPrompt);
         ImGui.Separator();
@@ -692,6 +747,7 @@ public class DebugWindow : Window, IDisposable
             var text = string.Join(Environment.NewLine,
                 $"状态: {StateLabel(automation.State)}",
                 $"暂停: {(automation.Paused ? "是" : "否")}",
+                $"队伍: {partyStatus}",
                 $"题目: {(string.IsNullOrEmpty(automation.CurrentPrompt) ? "-" : automation.CurrentPrompt)}",
                 $"信息: {automation.LastMessage}");
             ImGui.SetClipboardText(text);
@@ -699,7 +755,8 @@ public class DebugWindow : Window, IDisposable
         }
         EndCard();
 
-        BeginCard("##runHistory");
+        if (!BeginCard("##runHistory"))
+            return;
         ImGui.TextUnformatted("最近运行");
         ImGui.Separator();
         if (runHistory.Count == 0)
@@ -708,13 +765,53 @@ public class DebugWindow : Window, IDisposable
             DrawWrapped(MutedColor, entry);
         EndCard();
 
-        BeginCard("##sessionLog");
+        if (!BeginCard("##sessionLog"))
+            return;
         ImGui.TextUnformatted("会话日志");
         ImGui.Separator();
         foreach (var entry in uiLog)
             DrawWrapped(MutedColor, entry);
         EndCard();
 
+    }
+
+    private static unsafe string GetPartyStatus()
+    {
+        var player = Svc.Objects.LocalPlayer;
+        if (!Svc.ClientState.IsLoggedIn || player == null)
+            return "等待角色登录";
+        try
+        {
+            var crossRealm = InfoProxyCrossRealm.Instance();
+            if (crossRealm == null)
+                return "队伍状态确认中";
+            if (crossRealm->IsInCrossRealmParty)
+            {
+                var groups = crossRealm->CrossRealmGroups;
+                var groupIndex = crossRealm->LocalPlayerGroupIndex;
+                if (crossRealm->GroupCount == 0 || crossRealm->GroupCount > groups.Length ||
+                    groupIndex >= crossRealm->GroupCount)
+                    return "跨服组队状态 · 人数确认中";
+                ref var group = ref groups[groupIndex];
+                var memberCount = group.GroupMemberCount;
+                if (memberCount == 0 || memberCount > group.GroupMembers.Length)
+                    return "跨服组队状态 · 人数确认中";
+                return $"跨服组队状态 · {(crossRealm->IsPartyLeader ? "队长" : "队员")}（{memberCount} 人）";
+            }
+        }
+        catch (Exception)
+        {
+            return "队伍状态读取失败";
+        }
+        var party = Svc.Party;
+        var count = party.Length;
+        if (count == 0)
+            return "单人状态";
+        var leaderIndex = (int)party.PartyLeaderIndex;
+        var leader = leaderIndex >= 0 && leaderIndex < count ? party[leaderIndex] : null;
+        if (leader == null || leader.EntityId == 0 || leader.EntityId == 0xE0000000)
+            return $"组队状态 · 身份确认中（{count} 人）";
+        return $"组队状态 · {(leader.EntityId == player.EntityId ? "队长" : "队员")}（{count} 人）";
     }
 
     private void TrackRunHistory()
@@ -767,16 +864,22 @@ public class DebugWindow : Window, IDisposable
         ImGui.PopTextWrapPos();
     }
 
-    private static void BeginCard(string id)
+    private static bool BeginCard(string id)
     {
         ImGui.PushStyleColor(ImGuiCol.TableRowBg, CardBackground);
         ImGui.PushStyleColor(ImGuiCol.TableBorderLight, BorderColor);
         ImGui.PushStyleColor(ImGuiCol.TableBorderStrong, BorderColor);
         ImGui.PushStyleVar(ImGuiStyleVar.CellPadding, new Vector2(12, 12) * ImGuiHelpers.GlobalScale);
-        ImGui.BeginTable(id, 1,
-            ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersOuter | ImGuiTableFlags.NoSavedSettings);
+        if (!ImGui.BeginTable(id, 1,
+                ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersOuter | ImGuiTableFlags.NoSavedSettings))
+        {
+            ImGui.PopStyleVar();
+            ImGui.PopStyleColor(3);
+            return false;
+        }
         ImGui.TableNextRow();
         ImGui.TableNextColumn();
+        return true;
     }
 
     private static void EndCard()

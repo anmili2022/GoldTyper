@@ -43,6 +43,16 @@ public sealed class GameAutomation : IDisposable
     private readonly Dictionary<string, int> attempts = new();
     private string candidate = string.Empty;
     private long stableSince;
+    private int candidateDelay;
+    private string waitingPrompt = string.Empty;
+    private string delayBreakdown = string.Empty;
+    private long submittedAt;
+    public string DelayBreakdown => delayBreakdown;
+    public string WaitingPrompt => State == GameState.Detecting && candidate.Length > 0 ? waitingPrompt : string.Empty;
+    public int RemainingDelay => IsRunning && !Paused && State == GameState.Detecting && candidate.Length > 0
+        ? (int)Math.Clamp(candidateDelay - (Environment.TickCount64 - stableSince), 0, candidateDelay) : 0;
+    public long LastAnswerMilliseconds { get; private set; }
+    public long LastSubmitMilliseconds { get; private set; }
     private string ownedText = string.Empty;
     private string ownedSession = string.Empty;
     private bool clearRequested;
@@ -53,11 +63,6 @@ public sealed class GameAutomation : IDisposable
     public void Tick(GameSnapshot snapshot)
     {
         ProcessCleanup();
-        if (!Plugin.Configuration.启用防Afk活动输入)
-        {
-            ActivityInput.Reset();
-            ActivityInput.ProcessCleanup();
-        }
         if (!IsRunning || Paused)
             return;
         if (State == GameState.Reentering)
@@ -83,7 +88,6 @@ public sealed class GameAutomation : IDisposable
         }
         if (snapshot.ResultVisible)
         {
-            ActivityInput.Reset();
             State = Plugin.Configuration.自动再次参加 ? GameState.Reentering : GameState.Done;
             ReentryDriver.Reset();
             LastMessage = "已进入结算界面";
@@ -91,7 +95,6 @@ public sealed class GameAutomation : IDisposable
         }
         if (!snapshot.InputVisible || snapshot.InputFlag != true)
         {
-            ActivityInput.Reset();
             if (ownedText.Length > 0)
             {
                 InputDriver.ClearOwnedInput(ownedSession, ownedText);
@@ -99,7 +102,7 @@ public sealed class GameAutomation : IDisposable
             }
             State = GameState.Detecting;
             CurrentPrompt = string.Empty;
-            deadline = Environment.TickCount64 + NextDelay();
+            deadline = Environment.TickCount64;
             candidate = string.Empty;
             LastMessage = "等待可输入阶段";
             return;
@@ -112,11 +115,6 @@ public sealed class GameAutomation : IDisposable
             return;
         }
         var now = Environment.TickCount64;
-        if (Plugin.Configuration.启用防Afk活动输入 && ActivityInput.Tick(snapshot, false))
-        {
-            LastMessage = ActivityInput.Status;
-            return;
-        }
         var live = snapshot.Prompts.Where(IsValid).ToArray();
         var keys = live.Select(Key).ToHashSet();
         foreach (var key in attempts.Keys.Where(key => !keys.Contains(key)).ToArray())
@@ -128,7 +126,9 @@ public sealed class GameAutomation : IDisposable
                 ownedText = string.Empty;
                 State = GameState.Detecting;
                 failures = 0;
-                deadline = now + NextDelay();
+                LastAnswerMilliseconds = now - stableSince;
+                LastSubmitMilliseconds = submittedAt > 0 ? now - submittedAt : 0;
+                deadline = now;
                 candidate = string.Empty;
                 LastMessage = "提交回调已处理，等待下一次输入（不代表已加分）";
             }
@@ -150,7 +150,7 @@ public sealed class GameAutomation : IDisposable
                 InputDriver.ClearOwnedInput(ownedSession, ownedText);
                 ownedText = string.Empty;
                 State = GameState.Detecting;
-                deadline = now + NextDelay();
+                deadline = now;
                 candidate = string.Empty;
                 LastMessage = "词条已变化，取消待提交操作";
                 return;
@@ -166,6 +166,7 @@ public sealed class GameAutomation : IDisposable
             }
             attempts[pendingPath] = attempts.GetValueOrDefault(pendingPath) + 1;
             State = GameState.Submitting;
+            submittedAt = now;
             deadline = now + 5000;
             return;
         }
@@ -195,16 +196,16 @@ public sealed class GameAutomation : IDisposable
         {
             candidate = Key(prompt);
             stableSince = now;
-            LastMessage = $"等待词条稳定：{prompt.Text}";
+            candidateDelay = NextDelay(prompt.Text);
+            waitingPrompt = prompt.Text;
+            var characters = Plugin.Configuration.按词条长度动态延迟 ? prompt.Text.EnumerateRunes().Count() : 0;
+            var characterDelay = (long)characters * Math.Clamp(Plugin.Configuration.每个字符追加毫秒, 0, 30000);
+            delayBreakdown = $"基础随机 {lastBaseDelay} ms + {characters} 字 × {Math.Clamp(Plugin.Configuration.每个字符追加毫秒, 0, 30000)} ms = {lastBaseDelay + characterDelay} ms，实际等待 {candidateDelay} ms";
+            LastMessage = $"等待词条：{prompt.Text}（延迟 {candidateDelay} ms）";
             return;
         }
-        if (now - stableSince < 200)
+        if (now - stableSince < candidateDelay)
             return;
-        if (Plugin.Configuration.启用防Afk活动输入 && ActivityInput.Tick(snapshot, true))
-        {
-            LastMessage = ActivityInput.Status;
-            return;
-        }
         CurrentPrompt = prompt.Text;
         pendingPath = Key(prompt);
         var filled = InputDriver.Fill(CurrentPrompt, true);
@@ -215,7 +216,6 @@ public sealed class GameAutomation : IDisposable
         }
         ownedText = CurrentPrompt;
         ownedSession = session;
-        ActivityInput.Consume();
         State = GameState.Typing;
         var sent = InputDriver.Send(CurrentPrompt);
         LastMessage = sent;
@@ -226,6 +226,7 @@ public sealed class GameAutomation : IDisposable
         }
         attempts[pendingPath] = attempts.GetValueOrDefault(pendingPath) + 1;
         State = GameState.Submitting;
+        submittedAt = Environment.TickCount64;
         deadline = Environment.TickCount64 + 5000;
     }
 
@@ -247,19 +248,24 @@ public sealed class GameAutomation : IDisposable
 
     private void Abort(string message)
     {
-        ActivityInput.Reset();
         State = GameState.Error;
         LastMessage = message;
         var frame = GameDiagnostics.Instance.Snapshot;
-        AutomationLog.Write($"停止现场：inputVisible={frame.InputVisible} inputFlag={frame.InputFlag} resultVisible={frame.ResultVisible} score={frame.Score} hp={frame.Durability} session={frame.Session} expectedSession={session} input={frame.InputText} target={pendingPath} activity={ActivityInput.Status}", true);
+        AutomationLog.Write($"停止现场：inputVisible={frame.InputVisible} inputFlag={frame.InputFlag} resultVisible={frame.ResultVisible} score={frame.Score} hp={frame.Durability} session={frame.Session} expectedSession={session} input={frame.InputText} target={pendingPath}", true);
         ECommons.DalamudServices.Svc.Chat.PrintError($"金蝶打字通已停止：{message}");
     }
 
-    private static int NextDelay()
+    private static int lastBaseDelay;
+
+    private static int NextDelay(string text = "")
     {
-        var min = Math.Clamp(Plugin.Configuration.输入间隔最小毫秒, 500, 30000);
-        var max = Math.Clamp(Plugin.Configuration.输入间隔最大毫秒, min, 30000);
-        return Random.Shared.Next(min, max + 1);
+        var config = Plugin.Configuration;
+        var min = Math.Clamp(config.输入间隔最小毫秒, 500, 30000);
+        var max = Math.Clamp(config.输入间隔最大毫秒, min, 30000);
+        var perCharacter = Math.Clamp(config.每个字符追加毫秒, 0, 30000);
+        var characters = config.按词条长度动态延迟 ? text.EnumerateRunes().Count() : 0;
+        lastBaseDelay = Random.Shared.Next(min, max + 1);
+        return (int)Math.Clamp((long)lastBaseDelay + (long)characters * perCharacter, 500, 30000);
     }
 
     private void Fail(string message)
@@ -284,14 +290,18 @@ public sealed class GameAutomation : IDisposable
 
     public void Start()
     {
-        ActivityInput.Reset();
         ReentryDriver.RememberTarget();
         ReentryDriver.Reset();
         Paused = false;
         State = GameState.Detecting;
         CurrentPrompt = string.Empty;
         LastMessage = "等待小游戏开始";
-        deadline = Environment.TickCount64 + NextDelay();
+        LastAnswerMilliseconds = 0;
+        LastSubmitMilliseconds = 0;
+        submittedAt = 0;
+        waitingPrompt = string.Empty;
+        delayBreakdown = string.Empty;
+        deadline = Environment.TickCount64;
         failures = 0;
         session = string.Empty;
         candidate = string.Empty;
@@ -302,7 +312,6 @@ public sealed class GameAutomation : IDisposable
 
     public void Pause()
     {
-        ActivityInput.Reset();
         Paused = true;
         clearRequested = ownedText.Length > 0;
         if (IsRunning && State != GameState.Reentering)
@@ -321,12 +330,12 @@ public sealed class GameAutomation : IDisposable
 
         Paused = false;
         LastMessage = "已恢复";
-        deadline = Environment.TickCount64 + NextDelay();
+        candidate = string.Empty;
+        deadline = Environment.TickCount64;
     }
 
     public void Stop(string reason = "已停止")
     {
-        ActivityInput.Reset();
         clearRequested = ownedText.Length > 0;
         Paused = false;
         State = GameState.Idle;
@@ -336,7 +345,6 @@ public sealed class GameAutomation : IDisposable
 
     public void ProcessCleanup()
     {
-        ActivityInput.ProcessCleanup();
         if (!clearRequested)
             return;
         clearRequested = false;

@@ -14,7 +14,8 @@ public class Configuration : IPluginConfiguration
     public const int 默认失败重试次数 = 3;
 
     public bool 调试日志 = false;
-    public bool 启用防Afk活动输入 = true;
+    public bool 按词条长度动态延迟 = true;
+    public int 每个字符追加毫秒 = 180;
     public bool 自动再次参加 = false;
     public bool 优先处理读条目标 = true;
     public bool 优先处理近距离目标 = true;
@@ -49,7 +50,6 @@ public class Configuration : IPluginConfiguration
         }
         if (Version < 3)
         {
-            启用防Afk活动输入 = true;
             优先处理读条目标 = true;
             优先处理近距离目标 = true;
             Version = 3;
@@ -59,6 +59,8 @@ public class Configuration : IPluginConfiguration
 
     public void ResetAutomationDefaults()
     {
+        按词条长度动态延迟 = true;
+        每个字符追加毫秒 = 180;
         输入间隔最小毫秒 = 默认输入间隔最小毫秒;
         输入间隔最大毫秒 = 默认输入间隔最大毫秒;
         失败重试次数 = 默认失败重试次数;

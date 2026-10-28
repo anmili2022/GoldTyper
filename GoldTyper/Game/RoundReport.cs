@@ -53,11 +53,11 @@ public static unsafe class RoundReport
         var safeName = character;
         foreach (var invalid in Path.GetInvalidFileNameChars())
             safeName = safeName.Replace(invalid, '_');
-        var path = Path.Combine(DirectoryPath, $"{safeName}-{ended:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}.txt");
-        File.WriteAllText(path, text, new UTF8Encoding(false));
+        var path = Path.Combine(DirectoryPath, $"{safeName}.txt");
+        File.AppendAllText(path, text + Environment.NewLine, new UTF8Encoding(false));
         resultSeen = true;
         started = null;
-        Status = $"简报已保存：{path}";
+        Status = $"简报已追加：{path}";
         AutomationLog.Write(Status);
     }
 
